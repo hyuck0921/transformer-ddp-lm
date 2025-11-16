@@ -32,16 +32,39 @@ def setup_distributed():
         return 0, 1, 0
 
 
-def load_model_and_tokenizer(model_name: str, device: torch.device):
-    """Load Hugging Face model and tokenizer."""
-    print(f"Loading model: {model_name}")
+def load_model_and_tokenizer(model_name: str, device: torch.device, rank: int = 0):
+    """Load Hugging Face model and tokenizer.
     
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16 if device.type == 'cuda' else torch.float32,
-        device_map=None  # We'll handle device placement manually
-    )
+    Only rank 0 downloads the model, others load from cache.
+    """
+    if rank == 0:
+        print(f"[Rank 0] Downloading model: {model_name}")
+        print(f"[Rank 0] This may take a few minutes...")
+        
+        # Rank 0 downloads the model
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if device.type == 'cuda' else torch.float32,
+            device_map=None
+        )
+        
+        print(f"[Rank 0] Model downloaded successfully!")
+    
+    # Synchronize: wait for rank 0 to finish downloading
+    if dist.is_initialized():
+        dist.barrier()
+    
+    # Other ranks load from cache
+    if rank != 0:
+        print(f"[Rank {rank}] Loading model from cache...")
+        tokenizer = AutoTokenizer.from_pretrained(model_name, local_files_only=True)
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16 if device.type == 'cuda' else torch.float32,
+            device_map=None,
+            local_files_only=True
+        )
     
     model = model.to(device)
     model.eval()
@@ -100,8 +123,8 @@ def main(args):
         print(f"Device: {device}")
         print("="*80)
     
-    # Load model
-    model, tokenizer = load_model_and_tokenizer(args.model_name, device)
+    # Load model (rank 0 downloads, others load from cache)
+    model, tokenizer = load_model_and_tokenizer(args.model_name, device, rank)
     
     # Wrap with DDP if using multiple GPUs
     if world_size > 1:
